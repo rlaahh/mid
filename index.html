@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Hand → Particles Interaction</title>
+<style>
+/* =====[ 1. 폰트 정의 및 적용 ]===== */
+@font-face {
+    font-family: 'Monoplexkr';
+    src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_Monoplex-kr@1.0/MonoplexKR-Regular.woff2') format('woff2');
+    font-weight: 400;
+    font-display: swap;
+}
+body{margin:0;background:#0b0f1a;color:#e6e6e6;font-family:'Monoplexkr', sans-serif}
+/* ================================ */
+
+#ui{position:fixed;left:12px;top:12px;right:auto;bottom:auto;z-index:10;background:rgba(0, 0, 0, 0.8);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);padding:10px 12px;}
+label{display:block;font-size:12px;margin-bottom:6px;color:#ffffff}
+input[type=range]{width:220px}
+#note{font-size:11px;color:#ffffff;margin-top:6px}
+#canvas{display:block;width:100vw;height:100vh;position:fixed;left:0;top:0;z-index:5}
+#video{display:none;}
+#hint{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);font-size:12px;color:#9aa4b2;background:rgba(0,0,0,.35);padding:6px 10px;border-radius:999px;border:1px solid rgba(255,255,255,.08)}
+</style>
+</head>
+<body>
+<div id="ui">
+<label>주변의 기: <span id="countLabel">1000</span></label>
+<input id="count" type="range" min="2000" max="8000" step="100" value="4000">
+<label>색상 A</label>
+<input id="colorA" type="color" value="#ff00f7">
+<label>색상 B</label>
+<input id="colorB" type="color" value="#ffa82e">
+<div id="note">손을 모아 주변에 흩어진 기를 모아 보세요.</div>
+</div>
+<canvas id="canvas"></canvas>
+<video id="video" autoplay playsinline muted></video>
+<div id="hint">손을 모으면 기가 모이고, 펼치면 흩어집니다</div>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js"></script>
+<script>
+const canvas=document.getElementById('canvas');
+const ctx=canvas.getContext('2d');
+const video=document.getElementById('video');
+const countInput=document.getElementById('count');
+const countLabel=document.getElementById('countLabel');
+const colorAInput=document.getElementById('colorA');
+const colorBInput=document.getElementById('colorB');
+let colorA='#ff00f7';let colorB='#ffa82e';
+let devicePixelRatioCached=1;
+function resizeCanvas(){
+const dpr=window.devicePixelRatio||1;devicePixelRatioCached=dpr;const w=window.innerWidth;const h=window.innerHeight;canvas.width=Math.floor(w*dpr);canvas.height=Math.floor(h*dpr);canvas.style.width=w+'px';canvas.style.height=h+'px';}
+resizeCanvas();
+window.addEventListener('resize',resizeCanvas);
+const particles=[];
+let desiredParticleCount=+countInput.value|0;
+function randomRange(a,b){return a+Math.random()*(b-a)}
+function createParticle(){
+return{ x:randomRange(0,canvas.width), y:randomRange(0,canvas.height), vx:randomRange(-.2,.2), vy:randomRange(-.2,.2), size:randomRange(.6,1.8), g:(Math.random()<0.5?0:1) };
+}
+function setParticleCount(n){
+if(n>particles.length){ for(let i=particles.length;i<n;i++) particles.push(createParticle()); }
+else if(n<particles.length){ particles.length=n; }
+}
+setParticleCount(desiredParticleCount);
+countLabel.textContent=String(desiredParticleCount);
+countInput.addEventListener('input',e=>{desiredParticleCount=+countInput.value|0;countLabel.textContent=String(desiredParticleCount);setParticleCount(desiredParticleCount)});
+colorAInput.addEventListener('input',()=>{colorA=colorAInput.value});
+colorBInput.addEventListener('input',()=>{colorB=colorBInput.value});
+let lastTimestamp=0;let accum=0;const stepMs=1000/60;
+let handSpread=0;let handCenter=null;let handPresent=false;let handIsOpen=true;let fingertipPoints=[];let pinchActive=false;let minTipSeparation=1;let repelPulse=0
+let webcamReady = false;
+let pinchStartTime = 0;
+const textDelay = 3000;
+let textFadeIn = 0;
+
+function computeHandSpread(landmarks){
+let cx=0,cy=0;const tipIds=[4,8,12,16,20];let cnt=0;for(const id of tipIds){const lm=landmarks[id];if(!lm)continue;cx+=lm.x;cy+=lm.y;cnt++;}
+if(cnt===0){handCenter=null;return 0}
+cx/=cnt;cy/=cnt;handCenter={x:cx,y:cy};
+let sum=0;let used=0;for(const id of tipIds){const lm=landmarks[id];if(!lm)continue;const dx=lm.x-cx;const dy=lm.y-cy;sum+=Math.hypot(dx,dy);used++;}
+if(used===0)return 0;return sum/used;
+}
+
+function updatePhysics(dt){
+    const currentTime = performance.now();
+    if (pinchActive) {
+        if (pinchStartTime === 0) {
+            pinchStartTime = currentTime;
+        }
+        if (currentTime - pinchStartTime > textDelay) {
+            textFadeIn = Math.min(1.0, textFadeIn + 0.05 * dt);
+        }
+    } else {
+        textFadeIn = Math.max(0, textFadeIn - 0.1 * dt);
+        pinchStartTime = 0;
+    }
+
+    const hasHand=handPresent&&handCenter;const cx=(hasHand?handCenter.x:0.5)*canvas.width;const cy=(hasHand?handCenter.y:0.5)*canvas.height;
+    const spread=handSpread;
+    const closeThreshold=0.45;const openThreshold=0.55;let _at=0;
+    if(hasHand){
+    const prevOpen=handIsOpen;
+    if(handIsOpen){ if(spread<=closeThreshold){ handIsOpen=false; } }
+    else{ if(spread>=openThreshold){ handIsOpen=true; } }
+    if(!prevOpen&&handIsOpen){ repelPulse=1.0 }
+    if(pinchActive){ _at= (0.2 + Math.max(0,closeThreshold-spread))*240 } else { _at=0 }
+    }
+    const noise=.02;const damping=.995;const bounds=4;
+    for(let i=0;i<particles.length;i++){
+    const p=particles[i];
+    if(hasHand){
+    const dx=cx-p.x;const dy=cy-p.y;const dist=Math.hypot(dx,dy)+1e-4;const nx=dx/dist;const ny=dy/dist;const force=(_at)/Math.max(40,dist);
+    p.vx+=nx*force*dt;p.vy+=ny*force*dt;
+    if(_at===0&&handIsOpen){const dot=p.vx*nx+p.vy*ny;if(dot>0){p.vx-=nx*dot;p.vy-=ny*dot}
+    const rPx=Math.max(60,handSpread*280*devicePixelRatioCached);
+    if(dist<rPx){p.x=cx-nx*rPx;p.y=cy-ny*rPx;const dot2=p.vx*nx+p.vy*ny;if(dot2>0){p.vx-=nx*dot2;p.vy-=ny*dot2}const tx=-ny,ty=nx;p.vx+=tx*0.3;p.vy+=ty*0.3}}
+    }
+    if(repelPulse>0){
+    const dx=cx-p.x;const dy=cy-p.y;const dist=Math.hypot(dx,dy)+1e-4;const nx=dx/dist;const ny=dy/dist;const rp=(220*Math.min(1,repelPulse))/Math.max(60,dist);
+    p.vx-=nx*rp*dt;p.vy-=ny*rp*dt;
+    }
+    p.vx+=randomRange(-noise,noise);p.vy+=randomRange(-noise,noise);
+    p.vx*=damping;p.vy*=damping;
+    p.x+=p.vx*dt;p.y+=p.vy*dt;
+    if(p.x< -bounds){p.x=canvas.width+bounds}
+    if(p.y< -bounds){p.y=canvas.height+bounds}
+    if(p.x>canvas.width+bounds){p.x=-bounds}
+    if(p.y>canvas.height+bounds){p.y=-bounds}
+    }
+    if(repelPulse>0){repelPulse=Math.max(0,repelPulse-0.05*dt)}
+}
+
+function render(){
+    if (webcamReady) {
+        ctx.save();
+        ctx.scale(-1, 1);
+        ctx.translate(-canvas.width, 0);
+        ctx.filter = 'grayscale(100%) blur(10px)';
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        ctx.restore();
+
+        for(let i=0;i<particles.length;i++){
+            const p=particles[i];
+            ctx.fillStyle=p.g===0?colorA:colorB;
+            ctx.beginPath();ctx.arc(p.x,p.y,p.size*devicePixelRatioCached,0,Math.PI*2);ctx.fill();
+        }
+        
+        if(handPresent&&handCenter){
+            ctx.strokeStyle='rgba(0,0,0,0.1)';for(const pt of fingertipPoints){ctx.beginPath();ctx.arc(pt.x*canvas.width,pt.y*canvas.height,10*devicePixelRatioCached,0,Math.PI*2);ctx.stroke();}
+        }
+
+        if (textFadeIn > 0 && handCenter) {
+            const text = '기가 모였습니다.';
+            const textX = handCenter.x * canvas.width;
+            const textY = handCenter.y * canvas.height - 80;
+            const fontSize = 28;
+            
+            /* =====[ 2. 캔버스 폰트 적용 ]===== */
+            ctx.font = `bold ${fontSize}px Monoplexkr`;
+            /* ============================== */
+            
+            const metrics = ctx.measureText(text);
+            const textWidth = metrics.width;
+            const padding = 15;
+            const boxWidth = textWidth + padding * 2;
+            const boxHeight = fontSize + padding * 2;
+            const boxX = textX - boxWidth / 2;
+            const boxY = textY - boxHeight / 2;
+
+            ctx.fillStyle = `rgba(0, 0, 0)`;
+            ctx.fillRect(boxX, boxY, boxWidth, boxHeight);
+
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillStyle = `rgba(255, 255, 255, ${textFadeIn})`;
+            ctx.fillText(text, textX, textY);
+        }
+
+    } else {
+        ctx.clearRect(0, 0, canvas.width, canvas.height);
+    }
+}
+
+function loop(ts){
+if(!lastTimestamp)lastTimestamp=ts;let dtMs=ts-lastTimestamp;lastTimestamp=ts;accum+=dtMs;let steps=0;while(accum>=stepMs&&steps<3){updatePhysics(stepMs/16.6667);accum-=stepMs;steps++;}render();requestAnimationFrame(loop);}
+requestAnimationFrame(loop);
+async function setupCamera(){
+try{
+const stream=await navigator.mediaDevices.getUserMedia({video:{facingMode:'user',width:{ideal:640},height:{ideal:480}},audio:false});
+video.srcObject=stream;await new Promise(r=>video.onloadedmetadata=r);
+}catch(err){
+const note=document.getElementById('note');note.textContent='웹캠 접근 권한이 필요합니다. 브라우저 설정을 확인하세요.';throw err;
+}
+}
+let handsInstance=null;let cameraInstance=null;
+function onResults(results){
+if(results.multiHandLandmarks&&results.multiHandLandmarks.length>0){
+const lms=results.multiHandLandmarks[0];handSpread=computeHandSpread(lms);fingertipPoints=[];const tipIds=[4,8,12,16,20];for(const id of tipIds){const lm=lms[id];if(lm)fingertipPoints.push({x:lm.x,y:lm.y});}
+handPresent=fingertipPoints.length>0;
+minTipSeparation=1;for(let i=0;i<fingertipPoints.length;i++){for(let j=i+1;j<fingertipPoints.length;j++){const a=fingertipPoints[i],b=fingertipPoints[j];const d=Math.hypot(a.x-b.x,a.y-b.y);if(d<minTipSeparation)minTipSeparation=d;}}
+pinchActive=minTipSeparation<0.04;
+}else{handPresent=false;fingertipPoints=[];pinchActive=false;minTipSeparation=1;}
+}
+async function setupHands(){
+return new Promise((resolve)=>{
+const hands=new Hands({locateFile:(file)=>`https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+hands.setOptions({maxNumHands:1,modelComplexity:1,minDetectionConfidence:0.6,minTrackingConfidence:0.6,selfieMode:true});
+hands.onResults(onResults);
+handsInstance=hands;resolve();
+});
+}
+async function setupCameraPipe(){
+return new Promise((resolve)=>{
+const cam=new Camera(video,{onFrame:async()=>{await handsInstance.send({image:video});},width:640,height:480});
+cameraInstance=cam;cam.start();resolve();
+});
+}
+(async function init(){
+await setupCamera();
+await setupHands();
+await setupCameraPipe();
+webcamReady = true;
+})();
+</script>
+</body>
+</html>
