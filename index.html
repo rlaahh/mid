@@ -5,15 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Hand → Particles Interaction</title>
 <style>
-/* =====[ 1. 폰트 정의 및 적용 ]===== */
 @font-face {
     font-family: 'Monoplexkr';
     src: url('https://cdn.jsdelivr.net/gh/projectnoonnu/noonfonts_Monoplex-kr@1.0/MonoplexKR-Regular.woff2') format('woff2');
     font-weight: 400;
     font-display: swap;
 }
-body{margin:0;background:#0b0f1a;color:#e6e6e6;font-family:'Monoplexkr', sans-serif}
-/* ================================ */
+body{margin:0;background:#000000;color:#e6e6e6;font-family:'Monoplexkr', sans-serif}
+
 
 #ui{position:fixed;left:12px;top:12px;right:auto;bottom:auto;z-index:10;background:rgba(0, 0, 0, 0.8);border:1px solid rgba(255,255,255,.08);backdrop-filter:blur(8px);padding:10px 12px;}
 label{display:block;font-size:12px;margin-bottom:6px;color:#ffffff}
@@ -58,7 +57,7 @@ const particles=[];
 let desiredParticleCount=+countInput.value|0;
 function randomRange(a,b){return a+Math.random()*(b-a)}
 function createParticle(){
-return{ x:randomRange(0,canvas.width), y:randomRange(0,canvas.height), vx:randomRange(-.2,.2), vy:randomRange(-.2,.2), size:randomRange(.6,1.8), g:(Math.random()<0.5?0:1) };
+return{ x:randomRange(0,canvas.width), y:randomRange(0,canvas.height), vx:randomRange(-.2,.2), vy:randomRange(-.2,.2), size:randomRange(.8,2), g:(Math.random()<0.5?0:1) };
 }
 function setParticleCount(n){
 if(n>particles.length){ for(let i=particles.length;i<n;i++) particles.push(createParticle()); }
@@ -135,11 +134,37 @@ function updatePhysics(dt){
 
 function render(){
     if (webcamReady) {
+        const canvasWidth = canvas.width;
+        const canvasHeight = canvas.height;
+        const videoWidth = video.videoWidth;
+        const videoHeight = video.videoHeight;
+
         ctx.save();
         ctx.scale(-1, 1);
-        ctx.translate(-canvas.width, 0);
+        ctx.translate(-canvasWidth, 0);
         ctx.filter = 'grayscale(100%) blur(10px)';
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        if (videoWidth > 0 && videoHeight > 0) {
+            const canvasAspect = canvasWidth / canvasHeight;
+            const videoAspect = videoWidth / videoHeight;
+            let sx, sy, sWidth, sHeight;
+
+            if (canvasAspect > videoAspect) {
+                sWidth = videoWidth;
+                sHeight = videoWidth / canvasAspect;
+                sx = 0;
+                sy = (videoHeight - sHeight) / 2;
+            } else {
+                sWidth = videoHeight * canvasAspect;
+                sHeight = videoHeight;
+                sx = (videoWidth - sWidth) / 2;
+                sy = 0;
+            }
+            ctx.drawImage(video, sx, sy, sWidth, sHeight, 0, 0, canvasWidth, canvasHeight);
+        } else {
+            ctx.drawImage(video, 0, 0, canvasWidth, canvasHeight);
+        }
+        
         ctx.restore();
 
         for(let i=0;i<particles.length;i++){
@@ -158,9 +183,7 @@ function render(){
             const textY = handCenter.y * canvas.height - 80;
             const fontSize = 28;
             
-            /* =====[ 2. 캔버스 폰트 적용 ]===== */
             ctx.font = `bold ${fontSize}px Monoplexkr`;
-            /* ============================== */
             
             const metrics = ctx.measureText(text);
             const textWidth = metrics.width;
